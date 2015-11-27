@@ -1,160 +1,214 @@
-##Inspirasjon: Dean Attali - http://deanattali.com/2015/06/14/mimicking-google-form-shiny/
-
-##Todo:
-##Lage edit-funksjon
-##Sjekke at ID er numerisk
-
 library(shiny)
+library(shinyjs)
 
-alleFelt <- c("sak", "id", "journ", "newsvalue", "avd", "digidate", "digitime", "paperdate", "status")
-svarDir <- file.path("saker")
-epochTime <- function() {
-  as.integer(Sys.time())
+#Big thanks to Christoph Glur and his blog post:
+#http://ipub.com/shiny-crud-app/
+
+GetTableMetadata <- function() {
+  fields <- c(id = "Id", 
+              sak = "Sak", 
+              journ = "Journalist",
+              esc = "Esc.ID",
+              avd = "Avdeling",
+              digidate = "Pub.dato nett",
+              digitime = "Pub.tidspkt. nett",
+              avisdate = "Pub.dato avis",
+              newsvalue = "Nyhetsverdi",
+              status = "Status",
+              komm = "Kommentar")
+  result <- list(fields = fields)
+  return (result)
 }
 
-humanTime <- function() format(Sys.time(), "%d%m%Y-%H%M%OS")
-
-#Obligatoriske felt som må fylles ut før skjemaet kan lagres
-oblFelt <- c("sak", "journ", "status")
-
-# Sett en asterisk ved en input label
-labelObl <- function(label) {
-  tagList(
-    label,
-    span("*", class = "mandatory_star")
-  )
+# Find the next ID of a new record
+# (in mysql, this could be done by an incremental index)
+GetNextId <- function() {
+  if (exists("responses") && nrow(responses) > 0) {
+    max(as.integer(rownames(responses))) + 1
+  } else {
+    return (1)
+  }
 }
 
-appCSS <- ".mandatory_star { color: red; }"
+saveData <- function(){
+  tid <- format(Sys.time(), "%d%m%Y-%H%M%OS")
+  write.table(responses, paste0("data/",tid, "_", "responses.csv"), sep=",", row.names=FALSE)
+}
 
-loadData <- function() {
-  files <- list.files(file.path(svarDir), full.names = TRUE)
-  data <- lapply(files, read.csv, stringsAsFactors = FALSE)
-  idag <- as.integer(Sys.Date())
+timeFix <- function(){
   lgth <- length(data)
   
-    for (i in 1:lgth){
-      #Fiks dato
-      data[[i]][,6] <- as.Date(data[[i]][,6], origin="1970-01-01")
-      data[[i]][,8] <- as.Date(data[[i]][,8], origin="1970-01-01")
-      #Fiks klokkeslett
-      data[[i]][,7] <- ifelse(data[[i]][7] < 10, paste0("0", data[[i]][7]), data[[i]][7])
-      data[[i]][,7] <- paste0(data[[i]][,7], ":00")
-    }
-  data <- dplyr::rbind_all(data)
-  data <- subset(data, data[,6] > (idag-6))
-  names(data) <- c("Sak", "ID", "Journalist", "Verdi", "Avd.", "Pub. nett", "Tidspkt.", "Pub. avis", "Status", "Tidsmerke")
-  data
+  for (i in 1:lgth){
+    #Fiks dato
+    data[[i]][,5] <- as.Date(data[[i]][,5], origin="1970-01-01")
+    data[[i]][,7] <- as.Date(data[[i]][,7], origin="1970-01-01")
+    #Fiks klokkeslett
+    data[[i]][,6] <- ifelse(data[[i]][6] < 10, paste0("0", data[[i]][7]), data[[i]][7])
+    data[[i]][,6] <- paste0(data[[i]][,6], ":00")       
+  } 
 }
 
-shinyApp(
-  ui = fluidPage(
-    shinyjs:::useShinyjs(),
-    shinyjs::inlineCSS(appCSS),
-    titlePanel("BTs stoffliste"),
-    DT::dataTableOutput("responsesTable"),
-    downloadButton("downloadBtn", "Last ned alle"),
-    
-    fluidRow(br(),
-          div(
-              id = "form",
-      
-            column(3,
-                    textInput("sak", labelObl("Sak"), ""),
-                    numericInput("id", label="ID", value=NULL),
-                    textInput("journ", labelObl("Journalist"), ""),
-                    actionButton("submit", "Lagre", class = "btn-primary")),
-           
-            column(4, offset=1,
-                   selectInput("status", "Status",
-                               c("",  "I arbeid", "Til red.", "Klar", "Publisert")),
-                    selectInput("avd", "Avdeling",
-                        c("",  "Nyhet", "Samfunn", "Nett", "Kultur", "Feature", "Sport", "Kommentar", "Debatt")),
-                   sliderInput("newsvalue", "Nyhetsverdi", 0, 5, 2, ticks = TRUE)), 
-                   
-            column(4, 
-                    dateInput("digidate", label = "Publiseringsdato nett", 
-                               value = Sys.Date(), format = "dd-mm-yyyy", language="no"), 
-                    sliderInput("digitime", "Publiseres klokken", 0, 24, 12, ticks = TRUE),
-                    dateInput("paperdate", label = "Publiseringsdato avis", value = Sys.Date() + 1, format = "dd-mm-yyyy") 
-                    ))),
-    
-      shinyjs::hidden(
-        span(id = "submit_msg", "Oppdaterer..."),
-        div(id = "error",
-            div(br(), tags$b("#BTfail: "), span(id = "error_msg"))
-        ))
-    ),
-    
-      shinyjs::hidden(
-        div(
-          id = "thankyou_msg",
-          h3("Sak registrert"),
-          actionLink("submit_another", "Legg inn ny sak")
-          )
-        ),
+#C
+CreateData <- function(data) {
   
-  server = function(input, output, session) {
-    
-    observe({
-      # sjekk om alle obligatoriske felt har en verdi
-      mandatoryFilled <-
-        vapply(oblFelt,
-               function(x) {
-                 !is.null(input[[x]]) && input[[x]] != ""
-               },
-               logical(1))
-      mandatoryFilled <- all(mandatoryFilled)
-      
-      # enable/disable the submit button
-      shinyjs::toggleState(id = "submit", condition = mandatoryFilled)
-    })
-    
-    #Samle alle inputdata - med tidsmerke
-    formData <- reactive({
-      data <- sapply(alleFelt, function(x) input[[x]])
-      data <- c(data, timestamp = epochTime())
-      data <- t(data)
-      data
-    })
-    
-    #Lagre data
-    saveData <- function(data) {
-      fileName <- sprintf("%s_%s.csv",
-                          humanTime(),
-                          digest::digest(data))
-      
-      write.csv(x = data, file = file.path(svarDir, fileName),
-                row.names = FALSE, quote = TRUE)
+  data <- CastData(data)
+  rownames(data) <- GetNextId()
+  if (exists("responses")) {
+    responses <<- rbind(responses, data)
+  } else {
+    responses <<- data
+  }
+  saveData()
+}
+
+#R
+ReadData <- function() {
+  if (exists("responses")) {
+    responses
+  }
+  #timeFix()
+}
+
+
+
+#U
+UpdateData <- function(data) {
+  data <- CastData(data)
+  responses[row.names(responses) == row.names(data), ] <<- data
+  saveData()
+}
+
+#D
+DeleteData <- function(data) {
+  responses <<- responses[row.names(responses) != unname(data["id"]), ]
+  saveData()
+}
+
+# Cast from Inputs to a one-row data.frame
+CastData <- function(data) {
+  datar <- data.frame(sak = data["sak"], 
+                      journ = data["journ"],
+                      esc = data["esc"],
+                      avd = data["avd"],
+                      digidate = data["digidate"],
+                      digitime = data["digitime"],
+                      avisdate = data["avisdate"],
+                      newsvalue = data["newsvalue"],
+                      status = data["status"],
+                      komm = data["komm"],
+                      stringsAsFactors = FALSE)
+  
+  rownames(datar) <- data["id"]
+  return (datar)
+}
+
+
+
+
+# Return an empty, new record
+CreateDefaultRecord <- function() {
+  mydefault <- CastData(list(id = "0", sak = "", journ = "", esc = "", avd = "", digidate = "", 
+                             digitime = "", avisdate = "", newsvalue = "", status = "", 
+                             komm = ""))
+  return (mydefault)
+}
+
+# Fill the input fields with the values of the selected record in the table
+UpdateInputs <- function(data, session) {
+  updateTextInput(session, "id", value = unname(rownames(data)))
+  updateTextInput(session, "sak", value = unname(data["sak"]))
+  updateTextInput(session, "journ", value = unname(data["journ"]))
+  updateNumericInput(session, "esc", value = unname(data["esc"]))
+  updateSelectInput(session, "avd")
+  updateDateInput(session, "digidate")
+  updateSliderInput(session, "digitime", value = unname(data["digitime"]))
+  updateDateInput(session, "avisdate")
+  updateSliderInput(session, "newsvalue", value = unname(data["newsvalue"]))
+  updateSelectInput(session, "status")  
+  updateTextInput(session, "komm", value = unname(data["komm"]))
+  }
+
+
+ui <- fluidPage(
+  #use shiny js to disable the ID field
+  shinyjs::useShinyjs(),
+  titlePanel("BTs stoffliste"),
+  #data table
+  DT::dataTableOutput("responses", width = "100%"), 
+  #action buttons
+  actionButton("submit", "Lagre", class="btn-primary"),
+  actionButton("new", "Ny sak"),
+  actionButton("delete", "Slett"),
+  #input fields
+  tags$hr(),
+  fluidRow(
+  column(4,
+    shinyjs::disabled(textInput("id", "Id", "0")),
+    textInput("sak", "Sak", ""),
+    textInput("journ", "Journalist", ""),
+    numericInput("esc", "Esc.ID", "")),
+  column(4,
+    selectInput("avd", "Avdeling",
+              c("",  "Nyhet", "Samfunn", "Nett", "Kultur", "Feature", "Sport", "Video", "Kommentar", "Debatt")),
+    dateInput("digidate", label = "Pub.dato nett", value = Sys.Date(), format = "dd-mm-yyyy", language="no"),
+    sliderInput("digitime", "Publiseres klokken", 0, 24, 12, ticks = TRUE),
+    dateInput("avisdate", label = "Pub.dato avis", value = Sys.Date() + 1, format = "dd-mm-yyyy")),
+  column(4,
+    sliderInput("newsvalue", "Nyhetsverdi", 0, 5, 2, ticks = TRUE),
+    selectInput("status", "Status",
+                  c("Ikke påbegynt",  "I arbeid", "Til red.", "Klar", "Publisert")),  
+    textInput("komm", "Kommentar", "")))
+)
+
+
+server <- function(input, output, session) {
+  
+  # input fields are treated as a group
+  formData <- reactive({
+    sapply(names(GetTableMetadata()$fields), function(x) input[[x]])
+  })
+  
+  # Click "Submit" button -> save data
+  observeEvent(input$submit, {
+    if (input$id != "0") {
+      UpdateData(formData())
+    } else {
+      CreateData(formData())
+      UpdateInputs(CreateDefaultRecord(), session)
+    }
+  }, priority = 1)
+  
+  # Press "New" button -> display empty record
+  observeEvent(input$new, {
+    UpdateInputs(CreateDefaultRecord(), session)
+  })
+  
+  # Press "Delete" button -> delete from data
+  observeEvent(input$delete, {
+    DeleteData(formData())
+    UpdateInputs(CreateDefaultRecord(), session)
+  }, priority = 1)
+  
+  # Select row in table -> show details in inputs
+  observeEvent(input$responses_rows_selected, {
+    if (length(input$responses_rows_selected) > 0) {
+      data <- ReadData()[input$responses_rows_selected, ]
+      UpdateInputs(data, session)
     }
     
-    # Handling når Lagre-knappen trykkes
-    observeEvent(input$submit, {
-      saveData(formData())
-      shinyjs::reset("form")
-      shinyjs::hide("form")
-      shinyjs::show("thankyou_msg")
-      
-    })
-    
-    observeEvent(input$submit_another, {
-      shinyjs::show("form")
-      shinyjs::hide("thankyou_msg")
-    })    
-    output$responsesTable <- DT::renderDataTable(
-      loadData(),
-      rownames = FALSE,
-      options = list(searching = FALSE, lengthChange = FALSE)
-    )
-    
-    #Last ned alle data i en data frame
-    output$downloadBtn <- downloadHandler(
-      filename = function() { 
-        sprintf("BT_stoffliste_%s.csv", humanTime())
-      },
-      content = function(file) {
-        write.csv(loadData(), file, row.names = FALSE)
-      }
-    )
-  }
-)
+  })
+  
+  # display table
+  output$responses <- DT::renderDataTable({
+    #update after submit is clicked
+    input$submit
+    #update after delete is clicked
+    input$delete
+    ReadData()
+    ##Fikse dato her
+  }, server = FALSE, selection = "single",
+  colnames = unname(GetTableMetadata()$fields)[-1])}
+
+
+# Shiny app with 3 fields that the user can submit data for
+shinyApp(ui = ui, server = server)
